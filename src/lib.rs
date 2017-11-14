@@ -145,9 +145,3 @@ macro_rules! delay_ms {
     };
 }
 
-#[no_mangle]
-pub fn test() {
-    delay_ms!(40);
-    delay_us!(40000);
-}
-
