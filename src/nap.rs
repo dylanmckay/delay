@@ -25,9 +25,8 @@ pub const fn naps_required(cycles: u32) -> u32 {
 ///
 /// Note that `1` can be added to the cycles for each instruction
 /// if the system RAM is external.
-#[naked]
-#[allow(dead_code)] // this is only called via inline assembly.
-#[no_mangle]
+#[naked] // to guarantee there are no extra instructions.
+#[no_mangle] // so that this is callable via inline assembly.
 pub extern fn __avr_rust_perform_nap() {
     unsafe { asm!("nop" :::: "volatile") } // 1 cycle
     unsafe { asm!("nop" :::: "volatile") } // 2 cycles

@@ -35,6 +35,7 @@
 
 #![no_std]
 
+#[doc(hidden)]
 pub mod nap;
 mod util;
 
@@ -42,7 +43,7 @@ mod util;
 // FIXME: let clock frequency be configurable somehow.
 const CYCLES_PER_SECOND: u32 = 16_000_000;
 /// The number of clock cycles per microsecond.
-const CYCLES_PER_MICROS: u32 = CYCLES_PER_SECOND / 1_000_000;
+pub const CYCLES_PER_MICROS: u32 = CYCLES_PER_SECOND / 1_000_000;
 
 /// The number of cycles a single nap takes to run if it is not
 /// the last iteration in the execution (where the predicate is false).
@@ -51,32 +52,22 @@ const SUCCESSFUL_NAP_CYCLES: u32 = 16;
 /// of the loop where the loop condition is false.
 const FINAL_NAP_CYCLES: u32 = 7;
 
-/// Gets the number of cycles that are executed in a number of microseconds.
-pub const fn cycle_count_micros(micros: u32) -> u32 {
-    micros * CYCLES_PER_MICROS
-}
-
-/// Calculates how many cycles are wasted inside the looping code.
-const fn extraneous_cycles_from_looping(nap_count: u32) -> u32 {
-    nap_count * SUCCESSFUL_NAP_CYCLES + // these cycles will run once for each atom
-        FINAL_NAP_CYCLES // these cycles will be spent checking the failing loop condition in final iteration.
-}
-
-pub const fn actual_naps(cycle_count: u32) -> u32 {
-    // N.B. Integer divsion in truncating and so we will automatically round down.
-    // This is important because we don't want to oversubtract atoms because
-    // we should always delay for AT LEAST the expected duration.
-    //
+/// Finds the minimum number of naps required in order to sleep for
+/// a given number of CPU cycles.
+pub const fn minimum_naps(cycle_count: u32) -> u32 {
     // Note that the naps_required call has not been moved into a `let` because
     // it is not supported by the compiler as of 2017-11-15.
     nap::naps_required(cycle_count - extraneous_cycles_from_looping(nap::naps_required(cycle_count)))
 }
 
+/// Calculates how many cycles are spent inside the looping code.
+const fn extraneous_cycles_from_looping(nap_count: u32) -> u32 {
+    nap_count * SUCCESSFUL_NAP_CYCLES + // these cycles will run once for each nap
+        FINAL_NAP_CYCLES // these cycles will be spent checking the failing loop condition in final iteration.
+}
+
 #[naked]
-#[inline(never)]
-#[no_mangle]
-#[allow(unused_variables)] // We refer to arguments directly by registers.
-pub fn nap(nap_count: u32) {
+pub fn nap(_nap_count: u32) {
     unsafe {
         asm!(".start:");
 
@@ -91,17 +82,17 @@ pub fn nap(nap_count: u32) {
             asm!("cpc r21, r0"); // 1-cycle
             asm!("cpc r22, r0"); // 1-cycle
             asm!("cpc r23, r0"); // 1-cycle
-            asm!("breq .done ; Return if there are no more atoms left"); // 1-cycle if false, two if true.
+            asm!("breq .done ; Return if there are no more iterations left"); // 1-cycle if false, two if true.
         }
 
-        // Delay for an atom.
+        // Run a nap.
         // Runtime: 4 cycles.
         asm!("call __avr_rust_perform_nap"); // 4-cycles
 
         // Decrement nap_count.
         // Runtime: 4 cycles.
         {
-            // Subtract one from the atom count.
+            // Subtract one from the nap count.
             asm!("subi r20, 1"); // 1-cycle
             asm!("sbci r21, 0"); // 1-cycle
             asm!("sbci r22, 0"); // 1-cycle
@@ -122,7 +113,7 @@ macro_rules! delay_cycles {
         {
             // Place the const fn into a const to force CTFE.
             const CYCLE_COUNT: u32 = $cycle_count;
-            const NAP_COUNT: u32 = $crate::actual_naps(CYCLE_COUNT);
+            const NAP_COUNT: u32 = $crate::minimum_naps(CYCLE_COUNT);
 
             $crate::nap(NAP_COUNT);
         }
@@ -133,7 +124,7 @@ macro_rules! delay_cycles {
 #[macro_export]
 macro_rules! delay_us {
     ($microseconds:expr) => {
-        delay_cycles!($crate::cycle_count_micros($microseconds))
+        delay_cycles!($microseconds * $crate::CYCLES_PER_MICROS)
     };
 }
 
