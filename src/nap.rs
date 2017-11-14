@@ -1,16 +1,24 @@
-//! A 10-cycle atom.
+//! Utilities for sleeping the CPU.
 
-/// The number of CPU cycles it takes to execute the atom.
-pub const CYCLES_PER_ATOM: u32 = 25;
+use util;
 
-/// Gets the number of atoms to be used to delay
+/// The number of CPU cycles used by the nap routine itself.
+pub const NAP_STANDALONE_CYCLES: u32 = 21;
+/// The number of CPU cycles it takes to actually invoke the nap routine.
+pub const CALL_INSTRUCTION_CYCLES: u32 = 4;
+
+/// The number of CPU cycles it takes to execute one nap.
+pub const CYCLES_PER_NAP: u32 = NAP_STANDALONE_CYCLES + CALL_INSTRUCTION_CYCLES;
+
+/// Gets the number of iterations to be used to delay
 /// for a given number of milliseconds.
 ///
-/// The number of atoms, when executed, should at least
+/// The number of naps, when executed, should at least
 /// cover the entire duration denoted by `millis`.
-pub const fn iterations_required(cycles: u32) -> u32 {
-    // N.B. Integer division is truncating and so we will 
-    cycles / CYCLES_PER_ATOM
+pub const fn naps_required(cycles: u32) -> u32 {
+    // Round up so we never underestimate the time. At the very worst,
+    // we will overestimate it by clock_cycles(nap)-1 which is small.
+    util::division_ceil(cycles, CYCLES_PER_NAP)
 }
 
 /// Runs a small delay of exactly 21 cycles, not including the call instruction.
@@ -20,7 +28,7 @@ pub const fn iterations_required(cycles: u32) -> u32 {
 #[naked]
 #[allow(dead_code)] // this is only called via inline assembly.
 #[no_mangle]
-pub extern fn delay_21_cycles() {
+pub extern fn __avr_rust_perform_nap() {
     unsafe { asm!("nop" :::: "volatile") } // 1 cycle
     unsafe { asm!("nop" :::: "volatile") } // 2 cycles
     unsafe { asm!("nop" :::: "volatile") } // 3 cycles

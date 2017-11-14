@@ -1,26 +1,26 @@
-//! AVR delays.
+//! AVR compile-time delays.
 //!
 //! # Design
 //!
-//! Delay loops are built out of looped calls to 'delay atoms'.
-//! An atom is simply a function which delays for a predetermined
-//! number of cycles.
+//! Delay loops are built out of looped executions of a fixed-time 'nap' function.
 //!
-//! In order to calculate the number of atoms needed to cover a delay, we first
-//! figure out the number of cycles that cover the delay. Once we know that, we
-//! can extrapolate the minimum number of atoms executed sequentially so that
+//! In order to calculate the number of naps needed to cover a delay, we first
+//! figure out the number of CPU cycles that cover the delay. Once we know that, we
+//! can extrapolate the minimum number of naps  so that when executed sequentially
 //! the entire delay is made.
 //!
-//! The problem is that the looping code itself actully uses cycles. This means
-//! that every iteration runs a few instructions and makes the delay cycle take
-//! a bit longer.
+//! # Taking into account errors caused by loop instructions themselves
 //!
-//! In order to account for the looping code, we figure out how many cycles
-//! are wasted, deduce how many atoms that corresponds to, any then simply reduces
-//! the initial delay by this amount.
+//! There is a complexity added because the looping code itself actully uses CPU cycles.
+//! This means that every iteration of the nap function runs a few extra instructions,
+//! and makes the delay cycle takea bit longer. This is why when we perform delays,
+//! we must take care to take the clock cycle counts out of the inline
+//! assembly in the loop code itself when computing how many naps need to be taken.
 //!
-//! Note that the atom must have more cycles than the loop because otherwise the loop
-//! would take longer than the atom and we could never account for the error.
+//! In order to account for the looping code, `const fn`s calculate how many clock
+//! cycles will be added due to the loop instructions, potentially subtracting one
+//! or more naps to bring the actual execution time to within 25 clock cycles of the
+//! actual time.
 //!
 //! # Appendix
 //!
@@ -35,18 +35,21 @@
 
 #![no_std]
 
-pub mod atoms;
+pub mod nap;
+mod util;
 
 /// The CPU frequency.
+// FIXME: let clock frequency be configurable somehow.
 const CYCLES_PER_SECOND: u32 = 16_000_000;
+/// The number of clock cycles per microsecond.
 const CYCLES_PER_MICROS: u32 = CYCLES_PER_SECOND / 1_000_000;
 
-/// The number of cycles a single iteration of delay_atom_iterations
-/// takes to run if it is not the last iteration in the execution.
-const ATOM_DELAY_SUCCESSFUL_ITERATION_CYCLES: u32 = 16;
+/// The number of cycles a single nap takes to run if it is not
+/// the last iteration in the execution (where the predicate is false).
+const SUCCESSFUL_NAP_CYCLES: u32 = 16;
 /// The number of cycles spent executing the final redundant iteration
 /// of the loop where the loop condition is false.
-const ATOM_DELAY_FINAL_ITERATION_CYCLES: u32 = 7;
+const FINAL_NAP_CYCLES: u32 = 7;
 
 /// Gets the number of cycles that are executed in a number of microseconds.
 pub const fn cycle_count_micros(micros: u32) -> u32 {
@@ -54,32 +57,30 @@ pub const fn cycle_count_micros(micros: u32) -> u32 {
 }
 
 /// Calculates how many cycles are wasted inside the looping code.
-const fn extraneous_cycles_from_looping(iteration_count: u32) -> u32 {
-    iteration_count * ATOM_DELAY_SUCCESSFUL_ITERATION_CYCLES + // these cycles will run once for each atom
-        ATOM_DELAY_FINAL_ITERATION_CYCLES // these cycles will be spent checking the failing loop condition in final iteration.
+const fn extraneous_cycles_from_looping(nap_count: u32) -> u32 {
+    nap_count * SUCCESSFUL_NAP_CYCLES + // these cycles will run once for each atom
+        FINAL_NAP_CYCLES // these cycles will be spent checking the failing loop condition in final iteration.
 }
 
-/// Calculates how many extra iterations can be ran due to the looping code using cycles itself.
-const fn extraneous_iterations_from_looping(iteration_count: u32) -> u32 {
-    extraneous_cycles_from_looping(iteration_count) / atoms::twenty_five_cycles::CYCLES_PER_ATOM
-}
-
-pub const fn actual_iterations(iteration_count: u32) -> u32 {
+pub const fn actual_naps(cycle_count: u32) -> u32 {
     // N.B. Integer divsion in truncating and so we will automatically round down.
     // This is important because we don't want to oversubtract atoms because
     // we should always delay for AT LEAST the expected duration.
-    iteration_count - extraneous_iterations_from_looping(iteration_count)
+    //
+    // Note that the naps_required call has not been moved into a `let` because
+    // it is not supported by the compiler as of 2017-11-15.
+    nap::naps_required(cycle_count - extraneous_cycles_from_looping(nap::naps_required(cycle_count)))
 }
 
 #[naked]
 #[inline(never)]
 #[no_mangle]
 #[allow(unused_variables)] // We refer to arguments directly by registers.
-pub fn delay_atom_iterations(iteration_count: u32) {
+pub fn nap(nap_count: u32) {
     unsafe {
-        asm!(".iteration:");
+        asm!(".start:");
 
-        // Check if `iteration_count` is zero, return if so.
+        // Check if `nap_count` is zero, return if so.
         // This always runs each iteration.
         // Runtime:
         //     - 6 cycles if there are more iterations after this one
@@ -95,9 +96,9 @@ pub fn delay_atom_iterations(iteration_count: u32) {
 
         // Delay for an atom.
         // Runtime: 4 cycles.
-        asm!("call delay_21_cycles"); // 4-cycles
+        asm!("call __avr_rust_perform_nap"); // 4-cycles
 
-        // Decrement iteration_count.
+        // Decrement nap_count.
         // Runtime: 4 cycles.
         {
             // Subtract one from the atom count.
@@ -107,7 +108,7 @@ pub fn delay_atom_iterations(iteration_count: u32) {
             asm!("sbci r23, 0"); // 1-cycle
         }
 
-        asm!("rjmp .iteration"); // 2-cycles
+        asm!("rjmp .start"); // 2-cycles
 
         asm!(".done:");
         asm!("ret");
@@ -121,10 +122,9 @@ macro_rules! delay_cycles {
         {
             // Place the const fn into a const to force CTFE.
             const CYCLE_COUNT: u32 = $cycle_count;
-            const ITERATIONS_CONSERVATIVE: u32 = $crate::atoms::twenty_five_cycles::iterations_required(CYCLE_COUNT);
-            const ITERATIONS: u32 = $crate::actual_iterations(ITERATIONS_CONSERVATIVE);
+            const NAP_COUNT: u32 = $crate::actual_naps(CYCLE_COUNT);
 
-            $crate::delay_atom_iterations(ITERATIONS);
+            $crate::nap(NAP_COUNT);
         }
     }
 }
