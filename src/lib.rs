@@ -109,6 +109,12 @@ pub fn nap(_nap_count: u32) {
 /// Delays execution for a specified number of cycles.
 #[macro_export]
 macro_rules! delay_cycles {
+    // Single-cycle delay through a NOP instruction.
+    (1) => {
+        unsafe { asm!("nop" :::: "volatile") }
+    };
+
+    // Arbitrary delay.
     ($cycle_count:expr) => {
         {
             // Place the const fn into a const to force CTFE.
@@ -117,12 +123,14 @@ macro_rules! delay_cycles {
 
             $crate::nap(NAP_COUNT);
         }
-    }
+    };
 }
 
 /// Delays execution for a specified number of microseconds.
 #[macro_export]
 macro_rules! delay_us {
+    (0) => { () };
+
     ($microseconds:expr) => {
         delay_cycles!($microseconds * $crate::CYCLES_PER_MICROS)
     };
@@ -131,8 +139,19 @@ macro_rules! delay_us {
 /// Delays execution for a specified number of milliseconds.
 #[macro_export]
 macro_rules! delay_ms {
+    (0) => { () };
+
     ($milliseconds:expr) => {
         delay_us!($milliseconds * 1000)
+    };
+}
+
+/// Delays execution for a specified number of seconds.
+macro_rules! delay_s {
+    (0) => { () };
+
+    ($seconds:expr) => {
+        delay_ms!($seconds * 1000)
     };
 }
 
